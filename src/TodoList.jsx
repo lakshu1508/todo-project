@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
 
+const API_BASE = "http://localhost:8000/api";
+
 export default function TodoList() {
   // --- 1. PROFILE & AUTHENTICATION STATES ---
   const [userEmail, setUserEmail] = useState(null);
@@ -17,29 +19,22 @@ export default function TodoList() {
   const [taskText, setTaskText] = useState('');
   const [reminderTime, setReminderTime] = useState('');
 
-  // --- 3. LIFECYCLE HOOKS ---
+  // --- 3. LIFECYCLE HOOKS (API Pipelines) ---
+  
+  // Load existing session and quick switch profiles from server on startup
   useEffect(() => {
+    fetchSavedProfiles();
+    
     const activeEmail = localStorage.getItem('active_sandbox_user');
-    if (activeEmail) {
+    const activeName = localStorage.getItem('active_sandbox_username');
+    if (activeEmail && activeName) {
       setUserEmail(activeEmail);
-      const savedTodos = localStorage.getItem(`todos_${activeEmail}`);
-      if (savedTodos) setTodos(JSON.parse(savedTodos));
-      
-      const accounts = JSON.parse(localStorage.getItem('sandbox_profiles') || '[]');
-      const currentProfile = accounts.find(a => a.email === activeEmail);
-      if (currentProfile) setUserName(currentProfile.name);
+      setUserName(activeName);
+      fetchUserTodos(activeEmail);
     }
-
-    const profiles = localStorage.getItem('sandbox_profiles');
-    if (profiles) setSavedAccounts(JSON.parse(profiles));
   }, []);
 
-  useEffect(() => {
-    if (userEmail) {
-      localStorage.setItem(`todos_${userEmail}`, JSON.stringify(todos));
-    }
-  }, [todos, userEmail]);
-
+  // Background reminder clock loop
   useEffect(() => {
     const checkReminders = setInterval(() => {
       const nowString = new Date().toLocaleString([], { 
@@ -47,14 +42,13 @@ export default function TodoList() {
       });
 
       todos.forEach(todo => {
-        if (todo.reminder && !todo.completed && !todo.reminderTriggered) {
+        if (todo.reminder && !todo.completed && !todo.reminder_triggered) {
           const todoReminderString = new Date(todo.reminder).toLocaleString([], {
             year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric'
           });
 
           if (nowString === todoReminderString) {
-            todo.reminderTriggered = true;
-            setTodos([...todos]);
+            handleMarkTriggeredInBackend(todo.id);
             playNotificationSound();
             alert(`⏰ REMINDER FOR ${userName || userEmail}:\n\nTask: "${todo.text}"`);
           }
@@ -65,61 +59,135 @@ export default function TodoList() {
     return () => clearInterval(checkReminders);
   }, [todos, userEmail, userName]);
 
-  const playNotificationSound = () => {
+  // --- 4. NETWORK/API CALLS ---
+
+  const fetchSavedProfiles = async () => {
     try {
-      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      const oscillator = audioCtx.createOscillator();
-      const gainNode = audioCtx.createGain();
-      oscillator.type = 'sine';
-      oscillator.frequency.setValueAtTime(587.33, audioCtx.currentTime);
-      oscillator.connect(gainNode);
-      gainNode.connect(audioCtx.destination);
-      gainNode.gain.setValueAtTime(0.5, audioCtx.currentTime);
-      oscillator.start();
-      oscillator.stop(audioCtx.currentTime + 0.3);
-    } catch (e) {
-      console.log("Audio permission restriction bypassed", e);
+      const res = await fetch(`${API_BASE}/profiles`);
+      if (res.ok) {
+        const data = await res.json();
+        setSavedAccounts(data);
+      }
+    } catch (err) {
+      console.error("Could not reach backend profiles", err);
     }
   };
 
-  // --- 4. AUTHENTICATION HANDLERS ---
+  const fetchUserTodos = async (email) => {
+    try {
+      const res = await fetch(`${API_BASE}/todos/${email}`);
+      if (res.ok) {
+        const data = await res.json();
+        setTodos(data);
+      }
+    } catch (err) {
+      console.error("Could not fetch tasks from server", err);
+    }
+  };
+
   const checkEmailStatus = (email) => {
     const formattedEmail = email.trim().toLowerCase();
-    const profiles = JSON.parse(localStorage.getItem('sandbox_profiles') || '[]');
-    setIsNewUser(!profiles.some(p => p.email === formattedEmail));
+    setIsNewUser(!savedAccounts.some(p => p.email === formattedEmail));
   };
 
-  const handleLoginSubmit = (e) => {
+  const handleLoginSubmit = async (e) => {
     e.preventDefault();
     const formattedEmail = emailInput.trim().toLowerCase();
-    if (!formattedEmail || !passwordInput) return;
-
-    let profiles = JSON.parse(localStorage.getItem('sandbox_profiles') || '[]');
-    const existingUser = profiles.find(p => p.email === formattedEmail);
-
-    if (isNewUser) {
-      if (!nameInput.trim()) {
-        setAuthError('Please enter a Profile Name.');
-        return;
-      }
-      const newProfile = { email: formattedEmail, password: passwordInput, name: nameInput.trim() };
-      profiles.push(newProfile);
-      localStorage.setItem('sandbox_profiles', JSON.stringify(profiles));
-      setSavedAccounts(profiles);
-      setUserName(newProfile.name);
-    } else {
-      if (existingUser.password !== passwordInput) {
-        setAuthError('Incorrect password.');
-        return;
-      }
-      setUserName(existingUser.name);
-    }
-
-    setUserEmail(formattedEmail);
-    localStorage.setItem('active_sandbox_user', formattedEmail);
     setAuthError('');
-    const savedTodos = localStorage.getItem(`todos_${formattedEmail}`);
-    setTodos(savedTodos ? JSON.parse(savedTodos) : []);
+
+    const endpoint = isNewUser ? "/register" : "/login";
+    const bodyPayload = isNewUser 
+      ? { email: formattedEmail, password: passwordInput, name: nameInput.trim() }
+      : { email: formattedEmail, password: passwordInput };
+
+    try {
+      const res = await fetch(`${API_BASE}${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(bodyPayload)
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        setAuthError(data.detail || "Authentication failed.");
+        return;
+      }
+
+      // Login success
+      setUserEmail(data.email);
+      setUserName(data.name);
+      localStorage.setItem('active_sandbox_user', data.email);
+      localStorage.setItem('active_sandbox_username', data.name);
+      
+      fetchUserTodos(data.email);
+      fetchSavedProfiles(); // Refresh quick-switch list for next logouts
+    } catch (err) {
+      setAuthError("Server is unreachable. Make sure uvicorn is running.");
+    }
+  };
+
+  const handleAddTask = async (e) => {
+    e.preventDefault();
+    if (!taskText.trim()) return;
+
+    const payload = {
+      text: taskText,
+      timestamp: new Date().toLocaleString(),
+      reminder: reminderTime ? reminderTime : null
+    };
+
+    try {
+      const res = await fetch(`${API_BASE}/todos/${userEmail}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      if (res.ok) {
+        const newTodo = await res.json();
+        setTodos([...todos, newTodo]);
+        setTaskText('');
+        setReminderTime('');
+      }
+    } catch (err) {
+      console.error("Failed to add task to db", err);
+    }
+  };
+
+  const toggleTodo = async (id) => {
+    try {
+      const res = await fetch(`${API_BASE}/todos/${id}/toggle`, { method: 'PATCH' });
+      if (res.ok) {
+        const updatedTodo = await res.json();
+        setTodos(todos.map(t => t.id === id ? updatedTodo : t));
+      }
+    } catch (err) {
+      console.error("Failed to toggle task", err);
+    }
+  };
+
+  const handleMarkTriggeredInBackend = async (id) => {
+    try {
+      const res = await fetch(`${API_BASE}/todos/${id}/triggered`, { method: 'PATCH' });
+      if (res.ok) {
+        const updatedTodo = await res.json();
+        setTodos(todos.map(t => t.id === id ? updatedTodo : t));
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const deleteTodo = async (id) => {
+    try {
+      const res = await fetch(`${API_BASE}/todos/${id}`, { method: 'DELETE' });
+      if (res.ok) {
+        setTodos(todos.filter(t => t.id !== id));
+      }
+    } catch (err) {
+      console.error("Failed to remove task", err);
+    }
   };
 
   const handleSelectQuickAccount = (account) => {
@@ -137,48 +205,39 @@ export default function TodoList() {
     setNameInput('');
     setIsNewUser(false);
     localStorage.removeItem('active_sandbox_user');
+    localStorage.removeItem('active_sandbox_username');
   };
 
-  // --- 5. DATA PIPELINE LOGIC ---
-  const handleAddTask = (e) => {
-    e.preventDefault();
-    if (!taskText.trim()) return;
-
-    const newTodo = {
-      id: Date.now(),
-      text: taskText,
-      completed: false,
-      timestamp: new Date().toLocaleString(),
-      reminder: reminderTime ? reminderTime : null,
-      reminderTriggered: false
-    };
-
-    setTodos([...todos, newTodo]);
-    setTaskText('');
-    setReminderTime('');
+  const playNotificationSound = () => {
+    try {
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const oscillator = audioCtx.createOscillator();
+      const gainNode = audioCtx.createGain();
+      oscillator.type = 'sine';
+      oscillator.frequency.setValueAtTime(587.33, audioCtx.currentTime);
+      oscillator.connect(gainNode);
+      gainNode.connect(audioCtx.destination);
+      gainNode.gain.setValueAtTime(0.5, audioCtx.currentTime);
+      oscillator.start();
+      oscillator.stop(audioCtx.currentTime + 0.3);
+    } catch (e) {
+      console.log("Audio block bypass", e);
+    }
   };
 
-  const toggleTodo = (id) => {
-    setTodos(todos.map(t => t.id === id ? { ...t, completed: !t.completed } : t));
-  };
-
-  const deleteTodo = (id) => {
-    setTodos(todos.filter(t => t.id !== id));
-  };
-
-  // Split the states dynamically into separate active and completed arrays
+  // Splitting operations
   const activeTasks = todos.filter(t => !t.completed);
   const doneTasks = todos.filter(t => t.completed);
 
-  // --- 6. INTERFACE RENDERING LAYOUTS ---
+  // --- 5. CONDITIONAL RENDER WORKSPACE INTERFACES ---
   if (!userEmail) {
     return (
       <div style={styles.container}>
-        <h2 style={styles.title}>🔐 Client Dashboard Access</h2>
+        <h2 style={styles.title}>🔐 Client Dashboard Access (Full-Stack)</h2>
 
         {savedAccounts.length > 0 && (
           <div style={styles.quickSelectContainer}>
-            <span style={styles.sectionLabel}>🔄 Saved Client Profiles:</span>
+            <span style={styles.sectionLabel}>🔄 Accounts in Cloud DB:</span>
             <div style={styles.badgeRow}>
               {savedAccounts.map((account) => (
                 <button 
@@ -212,7 +271,7 @@ export default function TodoList() {
 
           {isNewUser && emailInput.includes('@') && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-              <p style={styles.infoNote}>✨ New account detected! Please enter a registration profile name:</p>
+              <p style={styles.infoNote}>✨ New account layout detected! Enter your profile registration name:</p>
               <input 
                 type="text" 
                 placeholder="Your Full Name / Company Name" 
@@ -235,7 +294,7 @@ export default function TodoList() {
 
           {authError && <p style={styles.errorText}>⚠️ {authError}</p>}
           <button type="submit" style={styles.primaryBtn}>
-            {isNewUser ? 'Create Profile & Login' : 'Authenticate Into Dashboard'}
+            {isNewUser ? 'Register Account to DB' : 'Login Securely'}
           </button>
         </form>
       </div>
@@ -246,7 +305,7 @@ export default function TodoList() {
     <div style={styles.container}>
       <div style={styles.headerRow}>
         <div>
-          <h3 style={{ margin: 0, color: '#6366f1' }}>💼 Welcome Back, {userName}!</h3>
+          <h3 style={{ margin: 0, color: '#6366f1' }}>💼 Connected: {userName}</h3>
           <span style={{ fontSize: '12px', color: '#9ca3af' }}>{userEmail}</span>
         </div>
         <button onClick={handleLogout} style={styles.logoutBtn}>Logout</button>
@@ -254,12 +313,12 @@ export default function TodoList() {
 
       <hr style={{ borderColor: '#1f2937', margin: '20px 0' }} />
 
-      <h2 style={styles.title}>📝 Task & Reminder Board</h2>
+      <h2 style={styles.title}>📝 Cloud Task Board</h2>
       
       <form onSubmit={handleAddTask} style={styles.verticalForm}>
         <input 
           type="text" 
-          placeholder="What's your next client task?" 
+          placeholder="What requirement needs adding to the db?" 
           value={taskText} 
           onChange={(e) => setTaskText(e.target.value)} 
           style={styles.input}
@@ -274,10 +333,9 @@ export default function TodoList() {
             style={styles.input} 
           />
         </div>
-        <button type="submit" style={styles.addBtn}>Save Task</button>
+        <button type="submit" style={styles.addBtn}>Commit Task to Database</button>
       </form>
 
-      {/* --- 🛑 SECTION 1: ACTIVE TASKS BOARDS --- */}
       <h4 style={{ ...styles.sectionLabel, marginTop: '25px', color: '#f59e0b' }}>⚡ In Progress ({activeTasks.length})</h4>
       <ul style={styles.list}>
         {activeTasks.map(todo => (
@@ -295,8 +353,12 @@ export default function TodoList() {
               <div style={styles.metaContainer}>
                 <span style={styles.metaText}>📅 Added: {todo.timestamp}</span>
                 {todo.reminder && (
-                  <span style={{ ...styles.metaText, color: '#f59e0b', fontWeight: '500' }}>
-                    🔔 Alert: {new Date(todo.reminder).toLocaleString()}
+                  <span style={{ 
+                    ...styles.metaText, 
+                    color: todo.reminder_triggered ? '#6b7280' : '#f59e0b', 
+                    fontWeight: '500' 
+                  }}>
+                    {todo.reminder_triggered ? '✅ Alert Sent:' : '🔔 Active Alert:'} {new Date(todo.reminder).toLocaleString()}
                   </span>
                 )}
               </div>
@@ -305,9 +367,8 @@ export default function TodoList() {
           </li>
         ))}
       </ul>
-      {activeTasks.length === 0 && <p style={styles.emptyText}>No active items inside your timeline.</p>}
+      {activeTasks.length === 0 && <p style={styles.emptyText}>No active items inside cloud pipeline.</p>}
 
-      {/* --- ✅ SECTION 2: COMPLETED "DONE" ARCHIVE --- */}
       <h4 style={{ ...styles.sectionLabel, marginTop: '30px', color: '#10b981' }}>🎉 Done ({doneTasks.length})</h4>
       <ul style={styles.list}>
         {doneTasks.map(todo => (
@@ -323,7 +384,7 @@ export default function TodoList() {
                 <span style={{ ...styles.todoText, textDecoration: 'line-through', color: '#9ca3af' }}>{todo.text}</span>
               </div>
               <div style={styles.metaContainer}>
-                <span style={styles.metaText}>🏁 Completed Project Element Archive</span>
+                <span style={styles.metaText}>🏁 Completed Element Record</span>
               </div>
             </div>
             <button onClick={() => deleteTodo(todo.id)} style={styles.deleteBtn}>🗑️</button>
@@ -335,13 +396,14 @@ export default function TodoList() {
   );
 }
 
+// Keeping style structures identical
 const styles = {
   container: { backgroundColor: '#111827', padding: '30px', borderRadius: '12px', maxWidth: '500px', margin: '40px auto', border: '1px solid #1f2937', boxShadow: '0 4px 15px rgba(0,0,0,0.5)', fontFamily: 'system-ui, sans-serif' },
   title: { margin: '0 0 15px 0', fontSize: '20px', fontWeight: '700', color: '#fff', textAlign: 'center' },
   sectionLabel: { fontSize: '13px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '0.8px', margin: '15px 0 10px 0', display: 'block' },
   quickSelectContainer: { backgroundColor: '#0b0f19', padding: '12px', borderRadius: '8px', border: '1px solid #1f2937', marginBottom: '20px' },
   badgeRow: { display: 'flex', flexWrap: 'wrap', gap: '8px', marginTop: '8px' },
-  profileBadge: { background: '#111827', border: '1px solid #1f2937', borderRadius: '6px', padding: '6px 12px', textAlign: 'left', cursor: 'pointer', display: 'flex', flexDirection: 'column', minWidth: '100px', transition: 'all 0.2s' },
+  profileBadge: { background: '#111827', border: '1px solid #1f2937', borderRadius: '6px', padding: '6px 12px', textAlign: 'left', cursor: 'pointer', display: 'flex', flexDirection: 'column', minWidth: '100px' },
   badgeName: { color: '#fff', fontSize: '13px', margin: 0, fontWeight: '600' },
   badgeEmail: { color: '#6b7280', fontSize: '10px' },
   infoNote: { color: '#10b981', fontSize: '12px', margin: '0 0 -4px 0' },
