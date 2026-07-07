@@ -1,3 +1,6 @@
+import os
+from datetime import datetime
+from typing import List, Optional
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
@@ -5,15 +8,22 @@ from sqlalchemy import create_engine, Column, Integer, String, Boolean, ForeignK
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
 from passlib.context import CryptContext
-from typing import List, Optional
+from apscheduler.schedulers.background import BackgroundScheduler
 
-# --- 1. DATABASE CONFIGURATION ---
-DATABASE_URL = "sqlite:///./todo_app.db"
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+# --- 1. IRONCLAD CLOUD DATABASE CONFIGURATION ---
+# Reads your secure production connection string when on Render, drops back to local SQLite file for safety
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./todo_app.db")
+
+# Automatically strips out SQLite-only configurations if connecting to production PostgreSQL
+if DATABASE_URL.startswith("sqlite"):
+    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+else:
+    engine = create_engine(DATABASE_URL)
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# --- 2. SECURITY & HASHING ---
+# --- 2. SECURITY & HASHING (Cooperative with bcrypt 4.0.1) ---
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 def hash_password(password: str) -> str:
@@ -22,7 +32,7 @@ def hash_password(password: str) -> str:
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password, hashed_password)
 
-# --- 3. SQLALCHEMY DATABASE MODELS ---
+# --- 3. DATABASE MODELS (Permanent cloud records) ---
 class DBUser(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True)
@@ -30,7 +40,6 @@ class DBUser(Base):
     name = Column(String, nullable=False)
     password_hash = Column(String, nullable=False)
     
-    # Relationship link to match tasks to this user profile
     todos = relationship("DBTodo", back_populates="owner", cascade="all, delete-orphan")
 
 class DBTodo(Base):
@@ -38,18 +47,17 @@ class DBTodo(Base):
     id = Column(Integer, primary_key=True, index=True)
     text = Column(String, nullable=False)
     completed = Column(Boolean, default=False)
-    timestamp = Column(String, nullable=False) # Created date string
-    reminder = Column(String, nullable=True)   # ISO string or null
+    timestamp = Column(String, nullable=False) 
+    reminder = Column(String, nullable=True)   # ISO Format: YYYY-MM-DDTHH:MM
     reminder_triggered = Column(Boolean, default=False)
     
-    # Foreign key pointing directly to the user id owning this item
     user_email = Column(String, ForeignKey("users.email"), nullable=False)
     owner = relationship("DBUser", back_populates="todos")
 
-# Create the physical database files/tables
+# Build tables directly in the cloud PostgreSQL cluster instantly
 Base.metadata.create_all(bind=engine)
 
-# --- 4. PYDANTIC SCHEMAS (Data Validation) ---
+# --- 4. PYDANTIC SCHEMAS (Requires email-validator package) ---
 class UserRegister(BaseModel):
     email: EmailStr
     name: str
@@ -81,7 +89,7 @@ class TodoResponse(BaseModel):
     class Config:
         from_attributes = True
 
-# --- 5. DEPENDENCY TO GET DB SESSION ---
+# --- 5. DATA INJECTION DEPENDENCY ---
 def get_db():
     db = SessionLocal()
     try:
@@ -89,18 +97,54 @@ def get_db():
     finally:
         db.close()
 
-# --- 6. FASTAPI INSTANCE & CORS SETUP ---
+# --- 6. CRON JOB REMINDER ENGINE (Runs 24/7 in background) ---
+def check_reminders_cron():
+    db = SessionLocal()
+    try:
+        # Grabs current server time format to compare up to the precise minute
+        now_str = datetime.now().strftime("%Y-%m-%dT%H:%M")
+        
+        # Pull records that hit milestones and are un-triggered
+        due_todos = db.query(DBTodo).filter(
+            DBTodo.completed == False,
+            DBTodo.reminder_triggered == False,
+            DBTodo.reminder.like(f"{now_str}%")
+        ).all()
+        
+        for todo in due_todos:
+            print(f"⏰ CRON MATCH DETECTED: Client {todo.user_email} requirement '{todo.text}' is due!")
+            
+            # NOTE: Connect third-party communication utilities (Twilio, SendGrid) here!
+            
+            # Switch state loop flag so it ceases recurring checks
+            todo.reminder_triggered = True
+            
+        db.commit()
+    except Exception as e:
+        print(f"Cron execution issue: {e}")
+    finally:
+        db.close()
+
+# Spin up and register our background cron cycle to trigger every single minute
+scheduler = BackgroundScheduler()
+scheduler.add_job(check_reminders_cron, 'cron', minute='*')
+scheduler.start()
+
+# --- 7. FASTAPI LIFECYCLE & CORS ENVIRONMENT WHITELIST ---
 app = FastAPI(title="Client Tracker Sandbox Backend")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=[
+        "http://localhost:5173",
+        "https://your-frontend-name.vercel.app" # TODO: Paste live production link here once created
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --- 7. AUTHENTICATION API ROUTES ---
+# --- 8. AUTHENTICATION API ROUTES ---
 
 @app.post("/api/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 def register_user(user_data: UserRegister, db: Session = Depends(get_db)):
@@ -129,14 +173,12 @@ def login_user(credentials: UserLogin, db: Session = Depends(get_db)):
 def get_all_profiles(db: Session = Depends(get_db)):
     return db.query(DBUser).all()
 
-# --- 8. TODO ACTIONS API ROUTES ---
+# --- 9. TODO ACTIONS API ROUTES ---
 
-# Fetch tasks matching only the logged in user's email address
 @app.get("/api/todos/{email}", response_model=List[TodoResponse])
 def get_user_todos(email: str, db: Session = Depends(get_db)):
     return db.query(DBTodo).filter(DBTodo.user_email == email.lower()).all()
 
-# Create a brand-new task for a specific client profile
 @app.post("/api/todos/{email}", response_model=TodoResponse)
 def create_todo(email: str, todo_data: TodoCreate, db: Session = Depends(get_db)):
     new_todo = DBTodo(
@@ -150,7 +192,6 @@ def create_todo(email: str, todo_data: TodoCreate, db: Session = Depends(get_db)
     db.refresh(new_todo)
     return new_todo
 
-# Toggle complete status of a specific task by database ID
 @app.patch("/api/todos/{todo_id}/toggle", response_model=TodoResponse)
 def toggle_todo_status(todo_id: int, db: Session = Depends(get_db)):
     todo = db.query(DBTodo).filter(DBTodo.id == todo_id).first()
@@ -161,7 +202,6 @@ def toggle_todo_status(todo_id: int, db: Session = Depends(get_db)):
     db.refresh(todo)
     return todo
 
-# Mark an alert as fired/triggered so it stops bugging the user window loop
 @app.patch("/api/todos/{todo_id}/triggered", response_model=TodoResponse)
 def mark_reminder_triggered(todo_id: int, db: Session = Depends(get_db)):
     todo = db.query(DBTodo).filter(DBTodo.id == todo_id).first()
@@ -172,7 +212,6 @@ def mark_reminder_triggered(todo_id: int, db: Session = Depends(get_db)):
     db.refresh(todo)
     return todo
 
-# Wipe a task item completely from the database records
 @app.delete("/api/todos/{todo_id}")
 def delete_todo(todo_id: int, db: Session = Depends(get_db)):
     todo = db.query(DBTodo).filter(DBTodo.id == todo_id).first()

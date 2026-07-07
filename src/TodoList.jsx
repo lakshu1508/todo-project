@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
 
-const API_BASE = "http://localhost:8000/api";
+// Targets cloud service APIs when deployed, falls back to local machine loop automatically
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api";
 
 export default function TodoList() {
-  // --- 1. PROFILE & AUTHENTICATION STATES ---
   const [userEmail, setUserEmail] = useState(null);
   const [userName, setUserName] = useState('');
   const [emailInput, setEmailInput] = useState('');
@@ -14,14 +14,10 @@ export default function TodoList() {
   const [isNewUser, setIsNewUser] = useState(false);
   const [authError, setAuthError] = useState('');
 
-  // --- 2. TODO & REMINDER STATES ---
   const [todos, setTodos] = useState([]);
   const [taskText, setTaskText] = useState('');
   const [reminderTime, setReminderTime] = useState('');
 
-  // --- 3. LIFECYCLE HOOKS (API Pipelines) ---
-  
-  // Load existing session and quick switch profiles from server on startup
   useEffect(() => {
     fetchSavedProfiles();
     
@@ -34,7 +30,6 @@ export default function TodoList() {
     }
   }, []);
 
-  // Background reminder clock loop
   useEffect(() => {
     const checkReminders = setInterval(() => {
       const nowString = new Date().toLocaleString([], { 
@@ -59,8 +54,6 @@ export default function TodoList() {
     return () => clearInterval(checkReminders);
   }, [todos, userEmail, userName]);
 
-  // --- 4. NETWORK/API CALLS ---
-
   const fetchSavedProfiles = async () => {
     try {
       const res = await fetch(`${API_BASE}/profiles`);
@@ -69,7 +62,7 @@ export default function TodoList() {
         setSavedAccounts(data);
       }
     } catch (err) {
-      console.error("Could not reach backend profiles", err);
+      console.error("Backend link broken or sleeping", err);
     }
   };
 
@@ -81,7 +74,7 @@ export default function TodoList() {
         setTodos(data);
       }
     } catch (err) {
-      console.error("Could not fetch tasks from server", err);
+      console.error(err);
     }
   };
 
@@ -114,14 +107,13 @@ export default function TodoList() {
         return;
       }
 
-      // Login success
       setUserEmail(data.email);
       setUserName(data.name);
       localStorage.setItem('active_sandbox_user', data.email);
       localStorage.setItem('active_sandbox_username', data.name);
       
       fetchUserTodos(data.email);
-      fetchSavedProfiles(); // Refresh quick-switch list for next logouts
+      fetchSavedProfiles();
     } catch (err) {
       setAuthError("Server is unreachable. Make sure uvicorn is running.");
     }
@@ -151,7 +143,7 @@ export default function TodoList() {
         setReminderTime('');
       }
     } catch (err) {
-      console.error("Failed to add task to db", err);
+      console.error(err);
     }
   };
 
@@ -163,7 +155,7 @@ export default function TodoList() {
         setTodos(todos.map(t => t.id === id ? updatedTodo : t));
       }
     } catch (err) {
-      console.error("Failed to toggle task", err);
+      console.error(err);
     }
   };
 
@@ -186,7 +178,7 @@ export default function TodoList() {
         setTodos(todos.filter(t => t.id !== id));
       }
     } catch (err) {
-      console.error("Failed to remove task", err);
+      console.error(err);
     }
   };
 
@@ -225,11 +217,9 @@ export default function TodoList() {
     }
   };
 
-  // Splitting operations
   const activeTasks = todos.filter(t => !t.completed);
   const doneTasks = todos.filter(t => t.completed);
 
-  // --- 5. CONDITIONAL RENDER WORKSPACE INTERFACES ---
   if (!userEmail) {
     return (
       <div style={styles.container}>
@@ -396,7 +386,6 @@ export default function TodoList() {
   );
 }
 
-// Keeping style structures identical
 const styles = {
   container: { backgroundColor: '#111827', padding: '30px', borderRadius: '12px', maxWidth: '500px', margin: '40px auto', border: '1px solid #1f2937', boxShadow: '0 4px 15px rgba(0,0,0,0.5)', fontFamily: 'system-ui, sans-serif' },
   title: { margin: '0 0 15px 0', fontSize: '20px', fontWeight: '700', color: '#fff', textAlign: 'center' },
