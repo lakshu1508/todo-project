@@ -137,7 +137,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
-        "https://your-frontend-name.vercel.app" # TODO: Paste live production link here once created
+        "https://todo-project-rho-three.vercel.app", # TODO: Paste live production link here once created
     ],
     allow_credentials=True,
     allow_methods=["*"],
