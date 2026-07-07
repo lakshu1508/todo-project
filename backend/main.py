@@ -135,10 +135,7 @@ app = FastAPI(title="Client Tracker Sandbox Backend")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "https://todo-project-rho-three.vercel.app", # TODO: Paste live production link here once created
-    ],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
