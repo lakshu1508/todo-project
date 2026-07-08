@@ -13,24 +13,23 @@ from apscheduler.schedulers.background import BackgroundScheduler
 # --- 1. CLOUD DATABASE CONFIGURATION ---
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./todo_app.db")
 
+# Automatically convert legacy postgres:// prefixes to postgresql:// for SQLAlchemy
 if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
 if DATABASE_URL.startswith("sqlite"):
     engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 else:
-    engine = create_engine(DATABASE_URL)
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# --- 2. SECURITY & MODERN RAW BCRYPT HASHING ---
+# --- 2. SECURITY & MODERN RAW BCRYPT HASHING (NO PASSLIB) ---
 def hash_password(password: str) -> str:
-    # Safely truncate down to 72 chars maximum
     safe_password = password[:72] if len(password) > 72 else password
-    # Convert string plaintext to raw bytes
     password_bytes = safe_password.encode('utf-8')
-    # Generate a salt and hash natively
+    
     salt = bcrypt.gensalt()
     hashed = bcrypt.hashpw(password_bytes, salt)
     return hashed.decode('utf-8')
@@ -66,6 +65,7 @@ class DBTodo(Base):
     user_email = Column(String, ForeignKey("users.email"), nullable=False)
     owner = relationship("DBUser", back_populates="todos")
 
+# Spin up structural configurations safely
 Base.metadata.create_all(bind=engine)
 
 # --- 4. PYDANTIC SCHEMAS ---
@@ -134,8 +134,8 @@ scheduler = BackgroundScheduler()
 scheduler.add_job(check_reminders_cron, 'cron', minute='*')
 scheduler.start()
 
-# --- 7. FASTAPI LIFECYCLE & CORS CONFIGURATION ---
-app = FastAPI(title="Client Tracker Sandbox Backend")
+# --- 7. FASTAPI APPLICATION SETUP ---
+app = FastAPI(title="Client Tracker Full-Stack Backend Pipeline")
 
 app.add_middleware(
     CORSMiddleware,
@@ -144,6 +144,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- 7.5 HEALTH-CHECK WAKE ROUTE FOR CRON JOBS ---
+@app.get("/")
+def keep_awake_endpoint():
+    return {
+        "status": "online",
+        "message": "Pipeline active. Prevented spin-down state.",
+        "timestamp": datetime.now().isoformat()
+    }
 
 # --- 8. AUTHENTICATION API ROUTES ---
 
@@ -197,29 +206,4 @@ def create_todo(email: str, todo_data: TodoCreate, db: Session = Depends(get_db)
 
 @app.patch("/api/todos/{todo_id}/toggle", response_model=TodoResponse)
 def toggle_todo_status(todo_id: int, db: Session = Depends(get_db)):
-    todo = db.query(DBTodo).filter(DBTodo.id == todo_id).first()
-    if not todo:
-        raise HTTPException(status_code=404, detail="Task not found.")
-    todo.completed = not todo.completed
-    db.commit()
-    db.refresh(todo)
-    return todo
-
-@app.patch("/api/todos/{todo_id}/triggered", response_model=TodoResponse)
-def mark_reminder_triggered(todo_id: int, db: Session = Depends(get_db)):
-    todo = db.query(DBTodo).filter(DBTodo.id == todo_id).first()
-    if not todo:
-        raise HTTPException(status_code=404, detail="Task not found.")
-    todo.reminder_triggered = True
-    db.commit()
-    db.refresh(todo)
-    return todo
-
-@app.delete("/api/todos/{todo_id}")
-def delete_todo(todo_id: int, db: Session = Depends(get_db)):
-    todo = db.query(DBTodo).filter(DBTodo.id == todo_id).first()
-    if not todo:
-        raise HTTPException(status_code=404, detail="Task not found.")
-    db.delete(todo)
-    db.commit()
-    return {"message": "Task successfully deleted"}
+    todo = db.query(DBTodo).filter(DBTodo.id == todo_id
