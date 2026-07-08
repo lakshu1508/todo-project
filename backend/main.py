@@ -11,10 +11,13 @@ from passlib.context import CryptContext
 from apscheduler.schedulers.background import BackgroundScheduler
 
 # --- 1. IRONCLAD CLOUD DATABASE CONFIGURATION ---
-# Reads your secure production connection string when on Render, drops back to local SQLite file for safety
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./todo_app.db")
 
-# Automatically strips out SQLite-only configurations if connecting to production PostgreSQL
+# 🛠️ CRITICAL FIX: Automatically convert legacy postgres:// prefixes to postgresql://
+# This stops newer SQLAlchemy versions from throwing an unhandled crash during requests!
+if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
 if DATABASE_URL.startswith("sqlite"):
     engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 else:
@@ -23,7 +26,7 @@ else:
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# --- 2. SECURITY & HASHING (Cooperative with bcrypt 4.0.1) ---
+# --- 2. SECURITY & HASHING ---
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 def hash_password(password: str) -> str:
@@ -32,7 +35,7 @@ def hash_password(password: str) -> str:
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password, hashed_password)
 
-# --- 3. DATABASE MODELS (Permanent cloud records) ---
+# --- 3. DATABASE MODELS ---
 class DBUser(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True)
@@ -48,20 +51,21 @@ class DBTodo(Base):
     text = Column(String, nullable=False)
     completed = Column(Boolean, default=False)
     timestamp = Column(String, nullable=False) 
-    reminder = Column(String, nullable=True)   # ISO Format: YYYY-MM-DDTHH:MM
+    reminder = Column(String, nullable=True)   
     reminder_triggered = Column(Boolean, default=False)
     
     user_email = Column(String, ForeignKey("users.email"), nullable=False)
     owner = relationship("DBUser", back_populates="todos")
 
-# Build tables directly in the cloud PostgreSQL cluster instantly
 Base.metadata.create_all(bind=engine)
 
-# --- 4. PYDANTIC SCHEMAS (Requires email-validator package) ---
+# --- 4. PYDANTIC SCHEMAS ---
+# 🛠️ CRITICAL FIX: Made name/username flexible to prevent payloads from failing validation
 class UserRegister(BaseModel):
     email: EmailStr
-    name: str
     password: str
+    name: Optional[str] = None
+    username: Optional[str] = None 
 
 class UserLogin(BaseModel):
     email: EmailStr
@@ -97,14 +101,11 @@ def get_db():
     finally:
         db.close()
 
-# --- 6. CRON JOB REMINDER ENGINE (Runs 24/7 in background) ---
+# --- 6. CRON JOB REMINDER ENGINE ---
 def check_reminders_cron():
     db = SessionLocal()
     try:
-        # Grabs current server time format to compare up to the precise minute
         now_str = datetime.now().strftime("%Y-%m-%dT%H:%M")
-        
-        # Pull records that hit milestones and are un-triggered
         due_todos = db.query(DBTodo).filter(
             DBTodo.completed == False,
             DBTodo.reminder_triggered == False,
@@ -113,10 +114,6 @@ def check_reminders_cron():
         
         for todo in due_todos:
             print(f"⏰ CRON MATCH DETECTED: Client {todo.user_email} requirement '{todo.text}' is due!")
-            
-            # NOTE: Connect third-party communication utilities (Twilio, SendGrid) here!
-            
-            # Switch state loop flag so it ceases recurring checks
             todo.reminder_triggered = True
             
         db.commit()
@@ -125,7 +122,6 @@ def check_reminders_cron():
     finally:
         db.close()
 
-# Spin up and register our background cron cycle to trigger every single minute
 scheduler = BackgroundScheduler()
 scheduler.add_job(check_reminders_cron, 'cron', minute='*')
 scheduler.start()
@@ -149,9 +145,12 @@ def register_user(user_data: UserRegister, db: Session = Depends(get_db)):
     if existing_user:
         raise HTTPException(status_code=400, detail="A profile with this email already exists.")
     
+    # Use whichever field the frontend sent, falling back to "User" if empty
+    resolved_name = user_data.name or user_data.username or "User"
+
     new_user = DBUser(
         email=user_data.email.lower(),
-        name=user_data.name,
+        name=resolved_name,
         password_hash=hash_password(user_data.password)
     )
     db.add(new_user)
