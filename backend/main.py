@@ -206,4 +206,29 @@ def create_todo(email: str, todo_data: TodoCreate, db: Session = Depends(get_db)
 
 @app.patch("/api/todos/{todo_id}/toggle", response_model=TodoResponse)
 def toggle_todo_status(todo_id: int, db: Session = Depends(get_db)):
-    todo = db.query(DBTodo).filter(DBTodo.id == todo_id
+    todo = db.query(DBTodo).filter(DBTodo.id == todo_id).first()
+    if not todo:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    todo.completed = not todo.completed
+    db.commit()
+    db.refresh(todo)
+    return todo
+
+@app.patch("/api/todos/{todo_id}/triggered", response_model=TodoResponse)
+def mark_reminder_triggered(todo_id: int, db: Session = Depends(get_db)):
+    todo = db.query(DBTodo).filter(DBTodo.id == todo_id).first()
+    if not todo:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    todo.reminder_triggered = True
+    db.commit()
+    db.refresh(todo)
+    return todo
+
+@app.delete("/api/todos/{todo_id}")
+def delete_todo(todo_id: int, db: Session = Depends(get_db)):
+    todo = db.query(DBTodo).filter(DBTodo.id == todo_id).first()
+    if not todo:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    db.delete(todo)
+    db.commit()
+    return {"message": "Task successfully deleted"}
