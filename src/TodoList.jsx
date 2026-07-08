@@ -18,6 +18,9 @@ export default function TodoList() {
   const [taskText, setTaskText] = useState('');
   const [reminderTime, setReminderTime] = useState('');
 
+  // 🛠️ CRITICAL ANTI-DUPLICATION LOCK STATE
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
   useEffect(() => {
     fetchSavedProfiles();
     
@@ -85,8 +88,13 @@ export default function TodoList() {
 
   const handleLoginSubmit = async (e) => {
     e.preventDefault();
+    
+    // Guard Clause: block extra clicks if network request is already processing
+    if (isSubmitting) return;
+
     const formattedEmail = emailInput.trim().toLowerCase();
     setAuthError('');
+    setIsSubmitting(true); // Lock authentication loop
 
     const endpoint = isNewUser ? "/register" : "/login";
     const bodyPayload = isNewUser 
@@ -112,16 +120,22 @@ export default function TodoList() {
       localStorage.setItem('active_sandbox_user', data.email);
       localStorage.setItem('active_sandbox_username', data.name);
       
-      fetchUserTodos(data.email);
-      fetchSavedProfiles();
+      await fetchUserTodos(data.email);
+      await fetchSavedProfiles();
     } catch (err) {
       setAuthError("Server is unreachable. Make sure uvicorn is running.");
+    } finally {
+      setIsSubmitting(false); // Release loop toggle safely
     }
   };
 
   const handleAddTask = async (e) => {
     e.preventDefault();
-    if (!taskText.trim()) return;
+    
+    // Guard Clause: block extra clicks if task is saving or input empty
+    if (isSubmitting || !taskText.trim()) return;
+
+    setIsSubmitting(true); // Lock input form actions
 
     const payload = {
       text: taskText,
@@ -144,6 +158,8 @@ export default function TodoList() {
       }
     } catch (err) {
       console.error(err);
+    } finally {
+      setIsSubmitting(false); // Re-enable task additions
     }
   };
 
@@ -183,6 +199,7 @@ export default function TodoList() {
   };
 
   const handleSelectQuickAccount = (account) => {
+    if (isSubmitting) return;
     setEmailInput(account.email);
     setIsNewUser(false);
     setAuthError('');
@@ -233,8 +250,10 @@ export default function TodoList() {
                 <button 
                   key={account.email} 
                   onClick={() => handleSelectQuickAccount(account)}
+                  disabled={isSubmitting}
                   style={{
                     ...styles.profileBadge,
+                    opacity: isSubmitting ? 0.6 : 1,
                     borderColor: emailInput.toLowerCase() === account.email ? '#6366f1' : '#1f2937'
                   }}
                 >
@@ -255,6 +274,7 @@ export default function TodoList() {
               setEmailInput(e.target.value);
               checkEmailStatus(e.target.value);
             }}
+            disabled={isSubmitting}
             style={styles.input}
             required
           />
@@ -267,6 +287,7 @@ export default function TodoList() {
                 placeholder="Your Full Name / Company Name" 
                 value={nameInput} 
                 onChange={(e) => setNameInput(e.target.value)}
+                disabled={isSubmitting}
                 style={styles.input}
                 required
               />
@@ -278,13 +299,14 @@ export default function TodoList() {
             placeholder="Password" 
             value={passwordInput} 
             onChange={(e) => setPasswordInput(e.target.value)}
+            disabled={isSubmitting}
             style={styles.input}
             required
           />
 
           {authError && <p style={styles.errorText}>⚠️ {authError}</p>}
-          <button type="submit" style={styles.primaryBtn}>
-            {isNewUser ? 'Register Account to DB' : 'Login Securely'}
+          <button type="submit" style={{...styles.primaryBtn, opacity: isSubmitting ? 0.7 : 1}} disabled={isSubmitting}>
+            {isSubmitting ? 'Processing Pipeline...' : isNewUser ? 'Register Account to DB' : 'Login Securely'}
           </button>
         </form>
       </div>
@@ -298,7 +320,7 @@ export default function TodoList() {
           <h3 style={{ margin: 0, color: '#6366f1' }}>💼 Connected: {userName}</h3>
           <span style={{ fontSize: '12px', color: '#9ca3af' }}>{userEmail}</span>
         </div>
-        <button onClick={handleLogout} style={styles.logoutBtn}>Logout</button>
+        <button onClick={handleLogout} style={styles.logoutBtn} disabled={isSubmitting}>Logout</button>
       </div>
 
       <hr style={{ borderColor: '#1f2937', margin: '20px 0' }} />
@@ -311,6 +333,7 @@ export default function TodoList() {
           placeholder="What requirement needs adding to the db?" 
           value={taskText} 
           onChange={(e) => setTaskText(e.target.value)} 
+          disabled={isSubmitting}
           style={styles.input}
           required
         />
@@ -320,10 +343,13 @@ export default function TodoList() {
             type="datetime-local" 
             value={reminderTime} 
             onChange={(e) => setReminderTime(e.target.value)} 
+            disabled={isSubmitting}
             style={styles.input} 
           />
         </div>
-        <button type="submit" style={styles.addBtn}>Commit Task to Database</button>
+        <button type="submit" style={{...styles.addBtn, opacity: isSubmitting ? 0.7 : 1}} disabled={isSubmitting}>
+          {isSubmitting ? "Committing Entry..." : "Commit Task to Database"}
+        </button>
       </form>
 
       <h4 style={{ ...styles.sectionLabel, marginTop: '25px', color: '#f59e0b' }}>⚡ In Progress ({activeTasks.length})</h4>
@@ -399,8 +425,8 @@ const styles = {
   headerRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' },
   verticalForm: { display: 'flex', flexDirection: 'column', gap: '12px' },
   input: { flex: 1, padding: '10px 14px', backgroundColor: '#0b0f19', border: '1px solid #374151', borderRadius: '6px', color: '#fff', fontSize: '14px', outline: 'none' },
-  primaryBtn: { padding: '12px', backgroundColor: '#6366f1', color: '#fff', border: 'none', borderRadius: '6px', fontWeight: '600', cursor: 'pointer', marginTop: '5px' },
-  addBtn: { padding: '12px', backgroundColor: '#10b981', color: '#fff', border: 'none', borderRadius: '6px', fontWeight: '600', cursor: 'pointer' },
+  primaryBtn: { padding: '12px', backgroundColor: '#6366f1', color: '#fff', border: 'none', borderRadius: '6px', fontWeight: '600', cursor: 'pointer', marginTop: '5px', transition: 'opacity 0.2s' },
+  addBtn: { padding: '12px', backgroundColor: '#10b981', color: '#fff', border: 'none', borderRadius: '6px', fontWeight: '600', cursor: 'pointer', transition: 'opacity 0.2s' },
   logoutBtn: { padding: '6px 12px', backgroundColor: '#ef4444', color: '#fff', border: 'none', borderRadius: '4px', fontSize: '12px', cursor: 'pointer' },
   list: { listStyleType: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: '10px' },
   listItem: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', backgroundColor: '#0b0f19', padding: '14px 16px', borderRadius: '8px', border: '1px solid #1f2937' },
