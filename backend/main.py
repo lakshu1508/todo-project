@@ -1,4 +1,5 @@
 import os
+import bcrypt
 from datetime import datetime
 from typing import List, Optional
 from fastapi import FastAPI, HTTPException, Depends, status
@@ -7,13 +8,11 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy import create_engine, Column, Integer, String, Boolean, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
-from passlib.context import CryptContext
 from apscheduler.schedulers.background import BackgroundScheduler
 
 # --- 1. CLOUD DATABASE CONFIGURATION ---
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./todo_app.db")
 
-# Automatically convert legacy postgres:// prefixes to postgresql://
 if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
@@ -25,19 +24,25 @@ else:
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# --- 2. SECURITY & HASHING ---
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
+# --- 2. SECURITY & MODERN RAW BCRYPT HASHING ---
 def hash_password(password: str) -> str:
-    # 🛠️ CRITICAL TRUNCATION FIX: Slices the string to 72 characters maximum.
-    # This prevents passlib/bcrypt from crashing when receiving long tokens!
+    # Safely truncate down to 72 chars maximum
     safe_password = password[:72] if len(password) > 72 else password
-    return pwd_context.hash(safe_password)
+    # Convert string plaintext to raw bytes
+    password_bytes = safe_password.encode('utf-8')
+    # Generate a salt and hash natively
+    salt = bcrypt.gensalt()
+    hashed = bcrypt.hashpw(password_bytes, salt)
+    return hashed.decode('utf-8')
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    # Match the truncation logic during validation checks
-    safe_password = plain_password[:72] if len(plain_password) > 72 else plain_password
-    return pwd_context.verify(safe_password, hashed_password)
+    try:
+        safe_password = plain_password[:72] if len(plain_password) > 72 else plain_password
+        password_bytes = safe_password.encode('utf-8')
+        hashed_bytes = hashed_password.encode('utf-8')
+        return bcrypt.checkpw(password_bytes, hashed_bytes)
+    except Exception:
+        return False
 
 # --- 3. DATABASE MODELS ---
 class DBUser(Base):
