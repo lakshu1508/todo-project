@@ -10,11 +10,10 @@ from sqlalchemy.orm import sessionmaker, Session, relationship
 from passlib.context import CryptContext
 from apscheduler.schedulers.background import BackgroundScheduler
 
-# --- 1. IRONCLAD CLOUD DATABASE CONFIGURATION ---
+# --- 1. CLOUD DATABASE CONFIGURATION ---
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./todo_app.db")
 
-# 🛠️ CRITICAL FIX: Automatically convert legacy postgres:// prefixes to postgresql://
-# This stops newer SQLAlchemy versions from throwing an unhandled crash during requests!
+# Automatically convert legacy postgres:// prefixes to postgresql://
 if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
@@ -30,10 +29,15 @@ Base = declarative_base()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+    # 🛠️ CRITICAL TRUNCATION FIX: Slices the string to 72 characters maximum.
+    # This prevents passlib/bcrypt from crashing when receiving long tokens!
+    safe_password = password[:72] if len(password) > 72 else password
+    return pwd_context.hash(safe_password)
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
+    # Match the truncation logic during validation checks
+    safe_password = plain_password[:72] if len(plain_password) > 72 else plain_password
+    return pwd_context.verify(safe_password, hashed_password)
 
 # --- 3. DATABASE MODELS ---
 class DBUser(Base):
@@ -60,7 +64,6 @@ class DBTodo(Base):
 Base.metadata.create_all(bind=engine)
 
 # --- 4. PYDANTIC SCHEMAS ---
-# 🛠️ CRITICAL FIX: Made name/username flexible to prevent payloads from failing validation
 class UserRegister(BaseModel):
     email: EmailStr
     password: str
@@ -126,7 +129,7 @@ scheduler = BackgroundScheduler()
 scheduler.add_job(check_reminders_cron, 'cron', minute='*')
 scheduler.start()
 
-# --- 7. FASTAPI LIFECYCLE & CORS ENVIRONMENT WHITELIST ---
+# --- 7. FASTAPI LIFECYCLE & CORS CONFIGURATION ---
 app = FastAPI(title="Client Tracker Sandbox Backend")
 
 app.add_middleware(
@@ -145,7 +148,6 @@ def register_user(user_data: UserRegister, db: Session = Depends(get_db)):
     if existing_user:
         raise HTTPException(status_code=400, detail="A profile with this email already exists.")
     
-    # Use whichever field the frontend sent, falling back to "User" if empty
     resolved_name = user_data.name or user_data.username or "User"
 
     new_user = DBUser(
