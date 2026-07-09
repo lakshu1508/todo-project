@@ -51,7 +51,8 @@ class DBUser(Base):
     name = Column(String, nullable=False)
     password_hash = Column(String, nullable=False)
     
-    todos = relationship("DBTodo", back_populates="owner", cascade="all, delete-orphan")
+    # Cascade relationship to clear items cleanly if a user profile leaves database
+    todos = relationship("DBTodo", back_populates="owner", cascade="all, delete-orphan", foreign_keys="DBTodo.user_email")
 
 class DBTodo(Base):
     __tablename__ = "todos"
@@ -62,8 +63,12 @@ class DBTodo(Base):
     reminder = Column(String, nullable=True)   
     reminder_triggered = Column(Boolean, default=False)
     
+    # Track who issued the task vs who is designated to execute it
+    assigned_by = Column(String, nullable=False)
+    assigned_to = Column(String, nullable=False)
+    
     user_email = Column(String, ForeignKey("users.email"), nullable=False)
-    owner = relationship("DBUser", back_populates="todos")
+    owner = relationship("DBUser", back_populates="todos", foreign_keys=[user_email])
 
 # Spin up structural configurations safely
 Base.metadata.create_all(bind=engine)
@@ -88,6 +93,7 @@ class UserResponse(BaseModel):
 class TodoCreate(BaseModel):
     text: str
     timestamp: str
+    assigned_to: str
     reminder: Optional[str] = None
 
 class TodoResponse(BaseModel):
@@ -98,6 +104,10 @@ class TodoResponse(BaseModel):
     reminder: Optional[str] = None
     reminder_triggered: bool
     user_email: str
+    assigned_by: str
+    assigned_to: str
+    status: str = "In Progress"
+    
     class Config:
         from_attributes = True
 
@@ -137,9 +147,17 @@ scheduler.start()
 # --- 7. FASTAPI APPLICATION SETUP ---
 app = FastAPI(title="Client Tracker Full-Stack Backend Pipeline")
 
+# Whitelist development environment alongside dynamic production fallback environment variable
+LIVE_FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    LIVE_FRONTEND_URL
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -187,22 +205,43 @@ def get_all_profiles(db: Session = Depends(get_db)):
 
 # --- 9. TODO ACTIONS API ROUTES ---
 
-@app.get("/api/todos/{email}", response_model=List[TodoResponse])
-def get_user_todos(email: str, db: Session = Depends(get_db)):
-    return db.query(DBTodo).filter(DBTodo.user_email == email.lower()).all()
-
 @app.post("/api/todos/{email}", response_model=TodoResponse)
 def create_todo(email: str, todo_data: TodoCreate, db: Session = Depends(get_db)):
+    # Create the task entry with target routing setup
     new_todo = DBTodo(
         text=todo_data.text,
         timestamp=todo_data.timestamp,
         reminder=todo_data.reminder,
+        assigned_by=email.lower(),
+        assigned_to=todo_data.assigned_to.lower(),
         user_email=email.lower()
     )
     db.add(new_todo)
     db.commit()
     db.refresh(new_todo)
+    
+    # Attach a helper status text string for schema mapping requirements
+    new_todo.status = "Done" if new_todo.completed else "In Progress"
     return new_todo
+
+@app.get("/api/todos/my-work/{email}", response_model=List[TodoResponse])
+def get_my_work_todos(email: str, db: Session = Depends(get_db)):
+    # Returns tasks assigned TO this specific user by anyone
+    todos = db.query(DBTodo).filter(DBTodo.assigned_to == email.lower()).all()
+    for todo in todos:
+        todo.status = "Done" if todo.completed else "In Progress"
+    return todos
+
+@app.get("/api/todos/tracked/{email}", response_model=List[TodoResponse])
+def get_tracked_outbound_todos(email: str, db: Session = Depends(get_db)):
+    # Returns tasks assigned BY this user to other profiles
+    todos = db.query(DBTodo).filter(
+        DBTodo.assigned_by == email.lower(),
+        DBTodo.assigned_to != email.lower()
+    ).all()
+    for todo in todos:
+        todo.status = "Done" if todo.completed else "In Progress"
+    return todos
 
 @app.patch("/api/todos/{todo_id}/toggle", response_model=TodoResponse)
 def toggle_todo_status(todo_id: int, db: Session = Depends(get_db)):
@@ -212,6 +251,7 @@ def toggle_todo_status(todo_id: int, db: Session = Depends(get_db)):
     todo.completed = not todo.completed
     db.commit()
     db.refresh(todo)
+    todo.status = "Done" if todo.completed else "In Progress"
     return todo
 
 @app.patch("/api/todos/{todo_id}/triggered", response_model=TodoResponse)
@@ -222,6 +262,7 @@ def mark_reminder_triggered(todo_id: int, db: Session = Depends(get_db)):
     todo.reminder_triggered = True
     db.commit()
     db.refresh(todo)
+    todo.status = "Done" if todo.completed else "In Progress"
     return todo
 
 @app.delete("/api/todos/{todo_id}")
