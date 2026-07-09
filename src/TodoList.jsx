@@ -14,22 +14,28 @@ export default function TodoList() {
   const [isNewUser, setIsNewUser] = useState(false);
   const [authError, setAuthError] = useState('');
 
-  const [todos, setTodos] = useState([]);
+  // Data lists
+  const [myInboundTodos, setMyInboundTodos] = useState([]);
+  const [globalOutboundTodos, setGlobalOutboundTodos] = useState([]);
+  
+  // Assignment Processing States
   const [taskText, setTaskText] = useState('');
   const [reminderTime, setReminderTime] = useState('');
+  const [taskTargetAssignee, setTaskTargetAssignee] = useState('');
 
-  // 🛠️ CRITICAL ANTI-DUPLICATION LOCK STATE
+  // 🛠️ ANTI-DUPLICATION LOCK STATE
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   useEffect(() => {
     fetchSavedProfiles();
+    fetchGlobalOutboundTodos();
     
     const activeEmail = localStorage.getItem('active_sandbox_user');
     const activeName = localStorage.getItem('active_sandbox_username');
     if (activeEmail && activeName) {
       setUserEmail(activeEmail);
       setUserName(activeName);
-      fetchUserTodos(activeEmail);
+      fetchInboundTodos(activeEmail);
     }
   }, []);
 
@@ -39,7 +45,7 @@ export default function TodoList() {
         year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric' 
       });
 
-      todos.forEach(todo => {
+      myInboundTodos.forEach(todo => {
         if (todo.reminder && !todo.completed && !todo.reminder_triggered) {
           const todoReminderString = new Date(todo.reminder).toLocaleString([], {
             year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric'
@@ -55,7 +61,7 @@ export default function TodoList() {
     }, 5000);
 
     return () => clearInterval(checkReminders);
-  }, [todos, userEmail, userName]);
+  }, [myInboundTodos, userEmail, userName]);
 
   const fetchSavedProfiles = async () => {
     try {
@@ -69,15 +75,38 @@ export default function TodoList() {
     }
   };
 
-  const fetchUserTodos = async (email) => {
+  const fetchGlobalOutboundTodos = async () => {
     try {
-      const res = await fetch(`${API_BASE}/todos/${email}`);
+      const res = await fetch(`${API_BASE}/profiles`);
       if (res.ok) {
-        const data = await res.json();
-        setTodos(data);
+        const profiles = await res.json();
+        let aggregatedOutbound = [];
+        
+        for (let profile of profiles) {
+          const resOutbound = await fetch(`${API_BASE}/todos/tracked/${profile.email}`);
+          if (resOutbound.ok) {
+            const dataOutbound = await resOutbound.json();
+            aggregatedOutbound = [...aggregatedOutbound, ...dataOutbound];
+          }
+        }
+        
+        const uniqueOutbound = aggregatedOutbound.filter((v, i, a) => a.findIndex(t => t.id === v.id) === i);
+        setGlobalOutboundTodos(uniqueOutbound);
       }
     } catch (err) {
-      console.error(err);
+      console.error("Error gathering global tracker metrics:", err);
+    }
+  };
+
+  const fetchInboundTodos = async (email) => {
+    try {
+      const resInbound = await fetch(`${API_BASE}/todos/my-work/${email}`);
+      if (resInbound.ok) {
+        const dataInbound = await resInbound.json();
+        setMyInboundTodos(dataInbound);
+      }
+    } catch (err) {
+      console.error("Error pulling inbound tasks:", err);
     }
   };
 
@@ -88,13 +117,11 @@ export default function TodoList() {
 
   const handleLoginSubmit = async (e) => {
     e.preventDefault();
-    
-    // Guard Clause: block extra clicks if network request is already processing
     if (isSubmitting) return;
 
     const formattedEmail = emailInput.trim().toLowerCase();
     setAuthError('');
-    setIsSubmitting(true); // Lock authentication loop
+    setIsSubmitting(true);
 
     const endpoint = isNewUser ? "/register" : "/login";
     const bodyPayload = isNewUser 
@@ -120,26 +147,26 @@ export default function TodoList() {
       localStorage.setItem('active_sandbox_user', data.email);
       localStorage.setItem('active_sandbox_username', data.name);
       
-      await fetchUserTodos(data.email);
+      await fetchInboundTodos(data.email);
       await fetchSavedProfiles();
+      await fetchGlobalOutboundTodos();
     } catch (err) {
-      setAuthError("Server is unreachable. Make sure uvicorn is running.");
+      setAuthError("Server is unreachable. Make sure backend is awake.");
     } finally {
-      setIsSubmitting(false); // Release loop toggle safely
+      setIsSubmitting(false);
     }
   };
 
   const handleAddTask = async (e) => {
     e.preventDefault();
-    
-    // Guard Clause: block extra clicks if task is saving or input empty
-    if (isSubmitting || !taskText.trim()) return;
+    if (isSubmitting || !taskText.trim() || !taskTargetAssignee) return;
 
-    setIsSubmitting(true); // Lock input form actions
+    setIsSubmitting(true);
 
     const payload = {
       text: taskText,
       timestamp: new Date().toLocaleString(),
+      assigned_to: taskTargetAssignee,
       reminder: reminderTime ? reminderTime : null
     };
 
@@ -151,15 +178,17 @@ export default function TodoList() {
       });
 
       if (res.ok) {
-        const newTodo = await res.json();
-        setTodos([...todos, newTodo]);
         setTaskText('');
         setReminderTime('');
+        setTaskTargetAssignee('');
+        // ✅ Instantly updates both your panel data configurations!
+        await fetchInboundTodos(userEmail);
+        await fetchGlobalOutboundTodos();
       }
     } catch (err) {
       console.error(err);
     } finally {
-      setIsSubmitting(false); // Re-enable task additions
+      setIsSubmitting(false);
     }
   };
 
@@ -167,8 +196,8 @@ export default function TodoList() {
     try {
       const res = await fetch(`${API_BASE}/todos/${id}/toggle`, { method: 'PATCH' });
       if (res.ok) {
-        const updatedTodo = await res.json();
-        setTodos(todos.map(t => t.id === id ? updatedTodo : t));
+        if (userEmail) await fetchInboundTodos(userEmail);
+        await fetchGlobalOutboundTodos();
       }
     } catch (err) {
       console.error(err);
@@ -179,8 +208,8 @@ export default function TodoList() {
     try {
       const res = await fetch(`${API_BASE}/todos/${id}/triggered`, { method: 'PATCH' });
       if (res.ok) {
-        const updatedTodo = await res.json();
-        setTodos(todos.map(t => t.id === id ? updatedTodo : t));
+        if (userEmail) await fetchInboundTodos(userEmail);
+        await fetchGlobalOutboundTodos();
       }
     } catch (err) {
       console.error(err);
@@ -191,7 +220,8 @@ export default function TodoList() {
     try {
       const res = await fetch(`${API_BASE}/todos/${id}`, { method: 'DELETE' });
       if (res.ok) {
-        setTodos(todos.filter(t => t.id !== id));
+        if (userEmail) await fetchInboundTodos(userEmail);
+        await fetchGlobalOutboundTodos();
       }
     } catch (err) {
       console.error(err);
@@ -208,13 +238,14 @@ export default function TodoList() {
   const handleLogout = () => {
     setUserEmail(null);
     setUserName('');
-    setTodos([]);
+    setMyInboundTodos([]);
     setEmailInput('');
     setPasswordInput('');
     setNameInput('');
     setIsNewUser(false);
     localStorage.removeItem('active_sandbox_user');
     localStorage.removeItem('active_sandbox_username');
+    fetchGlobalOutboundTodos();
   };
 
   const playNotificationSound = () => {
@@ -234,186 +265,268 @@ export default function TodoList() {
     }
   };
 
-  const activeTasks = todos.filter(t => !t.completed);
-  const doneTasks = todos.filter(t => t.completed);
+  const inboundActive = myInboundTodos.filter(t => !t.completed);
+  const inboundDone = myInboundTodos.filter(t => t.completed);
 
-  if (!userEmail) {
-    return (
-      <div style={styles.container}>
-        <h2 style={styles.title}>🔐 Client Dashboard Access (Full-Stack)</h2>
+  return (
+    <div style={{ maxWidth: '1000px', margin: '40px auto', padding: '0 20px' }}>
+      
+      {/* AUTHENTICATION LAYER */}
+      {!userEmail ? (
+        <div style={styles.container}>
+          <h2 style={styles.title}>🔐 Client Dashboard Access (Full-Stack)</h2>
 
-        {savedAccounts.length > 0 && (
-          <div style={styles.quickSelectContainer}>
-            <span style={styles.sectionLabel}>🔄 Accounts in Cloud DB:</span>
-            <div style={styles.badgeRow}>
-              {savedAccounts.map((account) => (
-                <button 
-                  key={account.email} 
-                  onClick={() => handleSelectQuickAccount(account)}
-                  disabled={isSubmitting}
-                  style={{
-                    ...styles.profileBadge,
-                    opacity: isSubmitting ? 0.6 : 1,
-                    borderColor: emailInput.toLowerCase() === account.email ? '#6366f1' : '#1f2937'
-                  }}
-                >
-                  <p style={styles.badgeName}>👤 {account.name}</p>
-                  <span style={styles.badgeEmail}>{account.email}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-
-        <form onSubmit={handleLoginSubmit} style={styles.verticalForm}>
-          <input 
-            type="email" 
-            placeholder="Client Email" 
-            value={emailInput} 
-            onChange={(e) => {
-              setEmailInput(e.target.value);
-              checkEmailStatus(e.target.value);
-            }}
-            disabled={isSubmitting}
-            style={styles.input}
-            required
-          />
-
-          {isNewUser && emailInput.includes('@') && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-              <p style={styles.infoNote}>✨ New account layout detected! Enter your profile registration name:</p>
-              <input 
-                type="text" 
-                placeholder="Your Full Name / Company Name" 
-                value={nameInput} 
-                onChange={(e) => setNameInput(e.target.value)}
-                disabled={isSubmitting}
-                style={styles.input}
-                required
-              />
+          {savedAccounts.length > 0 && (
+            <div style={styles.quickSelectContainer}>
+              <span style={styles.sectionLabel}>🔄 Accounts in Cloud DB:</span>
+              <div style={styles.badgeRow}>
+                {savedAccounts.map((account) => (
+                  <button 
+                    key={account.email} 
+                    onClick={() => handleSelectQuickAccount(account)}
+                    disabled={isSubmitting}
+                    style={{
+                      ...styles.profileBadge,
+                      opacity: isSubmitting ? 0.6 : 1,
+                      borderColor: emailInput.toLowerCase() === account.email ? '#6366f1' : '#1f2937'
+                    }}
+                  >
+                    <p style={styles.badgeName}>👤 {account.name}</p>
+                    <span style={styles.badgeEmail}>{account.email}</span>
+                  </button>
+                ))}
+              </div>
             </div>
           )}
 
-          <input 
-            type="password" 
-            placeholder="Password" 
-            value={passwordInput} 
-            onChange={(e) => setPasswordInput(e.target.value)}
-            disabled={isSubmitting}
-            style={styles.input}
-            required
-          />
+          <form onSubmit={handleLoginSubmit} style={styles.verticalForm}>
+            <input 
+              type="email" 
+              placeholder="Client Email" 
+              value={emailInput} 
+              onChange={(e) => {
+                setEmailInput(e.target.value);
+                checkEmailStatus(e.target.value);
+              }}
+              disabled={isSubmitting}
+              style={styles.input}
+              required
+            />
 
-          {authError && <p style={styles.errorText}>⚠️ {authError}</p>}
-          <button type="submit" style={{...styles.primaryBtn, opacity: isSubmitting ? 0.7 : 1}} disabled={isSubmitting}>
-            {isSubmitting ? 'Processing Pipeline...' : isNewUser ? 'Register Account to DB' : 'Login Securely'}
-          </button>
-        </form>
-      </div>
-    );
-  }
-
-  return (
-    <div style={styles.container}>
-      <div style={styles.headerRow}>
-        <div>
-          <h3 style={{ margin: 0, color: '#6366f1' }}>💼 Connected: {userName}</h3>
-          <span style={{ fontSize: '12px', color: '#9ca3af' }}>{userEmail}</span>
-        </div>
-        <button onClick={handleLogout} style={styles.logoutBtn} disabled={isSubmitting}>Logout</button>
-      </div>
-
-      <hr style={{ borderColor: '#1f2937', margin: '20px 0' }} />
-
-      <h2 style={styles.title}>📝 Cloud Task Board</h2>
-      
-      <form onSubmit={handleAddTask} style={styles.verticalForm}>
-        <input 
-          type="text" 
-          placeholder="What requirement needs adding to the db?" 
-          value={taskText} 
-          onChange={(e) => setTaskText(e.target.value)} 
-          disabled={isSubmitting}
-          style={styles.input}
-          required
-        />
-        <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
-          <label style={{ fontSize: '12px', color: '#9ca3af', minWidth: '95px' }}>⏰ Set Reminder:</label>
-          <input 
-            type="datetime-local" 
-            value={reminderTime} 
-            onChange={(e) => setReminderTime(e.target.value)} 
-            disabled={isSubmitting}
-            style={styles.input} 
-          />
-        </div>
-        <button type="submit" style={{...styles.addBtn, opacity: isSubmitting ? 0.7 : 1}} disabled={isSubmitting}>
-          {isSubmitting ? "Committing Entry..." : "Commit Task to Database"}
-        </button>
-      </form>
-
-      <h4 style={{ ...styles.sectionLabel, marginTop: '25px', color: '#f59e0b' }}>⚡ In Progress ({activeTasks.length})</h4>
-      <ul style={styles.list}>
-        {activeTasks.map(todo => (
-          <li key={todo.id} style={styles.listItem}>
-            <div style={styles.todoContent}>
-              <div style={styles.todoTextGroup}>
+            {isNewUser && emailInput.includes('@') && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                <p style={styles.infoNote}>✨ New account layout detected! Enter your profile registration name:</p>
                 <input 
-                  type="checkbox" 
-                  checked={todo.completed} 
-                  onChange={() => toggleTodo(todo.id)} 
-                  style={styles.checkbox}
+                  type="text" 
+                  placeholder="Your Full Name / Company Name" 
+                  value={nameInput} 
+                  onChange={(e) => setNameInput(e.target.value)}
+                  disabled={isSubmitting}
+                  style={styles.input}
+                  required
                 />
-                <span style={styles.todoText}>{todo.text}</span>
               </div>
-              <div style={styles.metaContainer}>
-                <span style={styles.metaText}>📅 Added: {todo.timestamp}</span>
-                {todo.reminder && (
-                  <span style={{ 
-                    ...styles.metaText, 
-                    color: todo.reminder_triggered ? '#6b7280' : '#f59e0b', 
-                    fontWeight: '500' 
-                  }}>
-                    {todo.reminder_triggered ? '✅ Alert Sent:' : '🔔 Active Alert:'} {new Date(todo.reminder).toLocaleString()}
-                  </span>
-                )}
+            )}
+
+            <input 
+              type="password" 
+              placeholder="Password" 
+              value={passwordInput} 
+              onChange={(e) => setPasswordInput(e.target.value)}
+              disabled={isSubmitting}
+              style={styles.input}
+              required
+            />
+
+            {authError && <p style={styles.errorText}>⚠️ {authError}</p>}
+            <button type="submit" style={{...styles.primaryBtn, opacity: isSubmitting ? 0.7 : 1}} disabled={isSubmitting}>
+              {isSubmitting ? 'Processing Pipeline...' : isNewUser ? 'Register Account to DB' : 'Login Securely'}
+            </button>
+          </form>
+        </div>
+      ) : (
+        <div style={{...styles.container, maxWidth: '100%'}}>
+          <div style={styles.headerRow}>
+            <div>
+              <h3 style={{ margin: 0, color: '#6366f1' }}>💼 Connected: {userName}</h3>
+              <span style={{ fontSize: '12px', color: '#9ca3af' }}>{userEmail}</span>
+            </div>
+            <button onClick={handleLogout} style={styles.logoutBtn} disabled={isSubmitting}>Logout</button>
+          </div>
+
+          <hr style={{ borderColor: '#1f2937', margin: '20px 0' }} />
+
+          <h2 style={styles.title}>📝 Cloud Task Assignment Engine</h2>
+          
+          <form onSubmit={handleAddTask} style={styles.verticalForm}>
+            <input 
+              type="text" 
+              placeholder="What instruction or requirement needs delegating?" 
+              value={taskText} 
+              onChange={(e) => setTaskText(e.target.value)} 
+              disabled={isSubmitting}
+              style={styles.input}
+              required
+            />
+            
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+              <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                <label style={{ fontSize: '12px', color: '#9ca3af', minWidth: '85px' }}>👤 Assign To:</label>
+                <select
+                  value={taskTargetAssignee}
+                  onChange={(e) => setTaskTargetAssignee(e.target.value)}
+                  disabled={isSubmitting}
+                  style={{...styles.input, width: '100%', height: '40px'}}
+                  required
+                >
+                  <option value="" style={{backgroundColor: '#0b0f19'}}>Select Teammate...</option>
+                  {savedAccounts.map(account => (
+                    <option key={account.email} value={account.email} style={{backgroundColor: '#0b0f19'}}>
+                      {account.name} ({account.email}) {account.email === userEmail ? "[Myself]" : ""}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                <label style={{ fontSize: '12px', color: '#9ca3af', minWidth: '85px' }}>⏰ Reminder:</label>
+                <input 
+                  type="datetime-local" 
+                  value={reminderTime} 
+                  onChange={(e) => setReminderTime(e.target.value)} 
+                  disabled={isSubmitting}
+                  style={styles.input} 
+                />
               </div>
             </div>
-            <button onClick={() => deleteTodo(todo.id)} style={styles.deleteBtn}>🗑️</button>
-          </li>
-        ))}
-      </ul>
-      {activeTasks.length === 0 && <p style={styles.emptyText}>No active items inside cloud pipeline.</p>}
 
-      <h4 style={{ ...styles.sectionLabel, marginTop: '30px', color: '#10b981' }}>🎉 Done ({doneTasks.length})</h4>
-      <ul style={styles.list}>
-        {doneTasks.map(todo => (
-          <li key={todo.id} style={{ ...styles.listItem, opacity: 0.65, backgroundColor: '#090d16', borderColor: '#111827' }}>
-            <div style={styles.todoContent}>
-              <div style={styles.todoTextGroup}>
-                <input 
-                  type="checkbox" 
-                  checked={todo.completed} 
-                  onChange={() => toggleTodo(todo.id)} 
-                  style={styles.checkbox}
-                />
-                <span style={{ ...styles.todoText, textDecoration: 'line-through', color: '#9ca3af' }}>{todo.text}</span>
-              </div>
-              <div style={styles.metaContainer}>
-                <span style={styles.metaText}>🏁 Completed Element Record</span>
-              </div>
-            </div>
-            <button onClick={() => deleteTodo(todo.id)} style={styles.deleteBtn}>🗑️</button>
-          </li>
-        ))}
-      </ul>
-      {doneTasks.length === 0 && <p style={styles.emptyText}>Nothing pushed to finished column yet.</p>}
+            <button type="submit" style={{...styles.addBtn, opacity: isSubmitting ? 0.7 : 1}} disabled={isSubmitting}>
+              {isSubmitting ? "Committing Entry..." : "Issue & Assign Task via Cloud"}
+            </button>
+          </form>
+        </div>
+      )}
+
+      {/* LOWER PANELS GRID */}
+      <div style={{ 
+        marginTop: '30px',
+        backgroundColor: '#111827',
+        padding: '25px',
+        borderRadius: '12px',
+        border: '1px solid #1f2937'
+      }}>
+        
+        {userEmail ? (
+          <div>
+            <h3 style={{ fontSize: '16px', fontWeight: '700', color: '#f59e0b', borderBottom: '1px solid #1f2937', paddingBottom: '8px', marginBottom: '15px', marginTop: 0 }}>
+              📥 Assigned To Me ({inboundActive.length})
+            </h3>
+            
+            <h4 style={{ ...styles.sectionLabel, color: '#d97706', fontSize: '11px' }}>⚡ In Progress</h4>
+            <ul style={styles.list}>
+              {inboundActive.map(todo => (
+                <li key={todo.id} style={styles.listItem}>
+                  <div style={styles.todoContent}>
+                    <div style={styles.todoTextGroup}>
+                      <input 
+                        type="checkbox" 
+                        checked={todo.completed} 
+                        onChange={() => toggleTodo(todo.id)} 
+                        style={styles.checkbox}
+                      />
+                      <span style={styles.todoText}>{todo.text}</span>
+                    </div>
+                    <div style={styles.metaContainer}>
+                      <span style={styles.metaText}>👤 From: {todo.assigned_by}</span>
+                      <span style={styles.metaText}>📅 Date: {todo.timestamp}</span>
+                      {todo.reminder && (
+                        <span style={{ ...styles.metaText, color: todo.reminder_triggered ? '#6b7280' : '#f59e0b' }}>
+                          {todo.reminder_triggered ? '✅ Alert Sent:' : '🔔 Alert:'} {new Date(todo.reminder).toLocaleString()}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  <button onClick={() => deleteTodo(todo.id)} style={styles.deleteBtn}>🗑️</button>
+                </li>
+              ))}
+            </ul>
+            {inboundActive.length === 0 && <p style={styles.emptyText}>No inbound items to execute.</p>}
+
+            <h4 style={{ ...styles.sectionLabel, color: '#059669', fontSize: '11px', marginTop: '20px' }}>🎉 Completed Tasks</h4>
+            <ul style={styles.list}>
+              {inboundDone.map(todo => (
+                <li key={todo.id} style={{ ...styles.listItem, opacity: 0.65, backgroundColor: '#090d16', borderColor: '#111827' }}>
+                  <div style={styles.todoContent}>
+                    <div style={styles.todoTextGroup}>
+                      <input 
+                        type="checkbox" 
+                        checked={todo.completed} 
+                        onChange={() => toggleTodo(todo.id)} 
+                        style={styles.checkbox}
+                      />
+                      <span style={{ ...styles.todoText, textDecoration: 'line-through', color: '#9ca3af' }}>{todo.text}</span>
+                    </div>
+                    <div style={styles.metaContainer}>
+                      <span style={styles.metaText}>👤 From: {todo.assigned_by}</span>
+                    </div>
+                  </div>
+                  <button onClick={() => deleteTodo(todo.id)} style={styles.deleteBtn}>🗑️</button>
+                </li>
+              ))}
+            </ul>
+            {inboundDone.length === 0 && <p style={styles.emptyText}>Nothing in completed list.</p>}
+          </div>
+        ) : (
+          <div>
+            <h3 style={{ fontSize: '16px', fontWeight: '700', color: '#10b981', borderBottom: '1px solid #1f2937', paddingBottom: '8px', marginBottom: '15px', marginTop: 0 }}>
+              📤 Assigned To Others (Live Status Tracker)
+            </h3>
+            
+            <ul style={styles.list}>
+              {globalOutboundTodos.map(todo => (
+                <li key={todo.id} style={{
+                  ...styles.listItem,
+                  borderColor: todo.status === 'Done' ? '#065f46' : '#1f2937',
+                  background: todo.status === 'Done' ? '#04070d' : '#0b0f19'
+                }}>
+                  <div style={styles.todoContent}>
+                    <p style={{
+                      ...styles.todoText, 
+                      margin: 0, 
+                      fontWeight: '500',
+                      textDecoration: todo.status === 'Done' ? 'line-through' : 'none',
+                      color: todo.status === 'Done' ? '#6b7280' : '#fff'
+                    }}>
+                      {todo.text}
+                    </p>
+                    <div style={styles.metaContainer}>
+                      <span style={styles.metaText}>👤 Issued By: <span style={{color: '#9ca3af'}}>{todo.assigned_by}</span></span>
+                      <span style={styles.metaText}>👤 Assigned To: <b style={{color: '#818cf8'}}>{todo.assigned_to}</b></span>
+                      <span style={styles.metaText}>📅 Date: {todo.timestamp}</span>
+                      <span style={{
+                        fontSize: '11px', 
+                        fontWeight: '700', 
+                        marginTop: '4px',
+                        color: todo.status === 'Done' ? '#10b981' : '#f59e0b'
+                      }}>
+                        📡 Current Status: {todo.status}
+                      </span>
+                    </div>
+                  </div>
+                </li>
+              ))}
+            </ul>
+            {globalOutboundTodos.length === 0 && <p style={styles.emptyText}>No outbound tasks issued inside the cloud pipeline yet.</p>}
+          </div>
+        )}
+
+      </div>
     </div>
   );
 }
 
 const styles = {
-  container: { backgroundColor: '#111827', padding: '30px', borderRadius: '12px', maxWidth: '500px', margin: '40px auto', border: '1px solid #1f2937', boxShadow: '0 4px 15px rgba(0,0,0,0.5)', fontFamily: 'system-ui, sans-serif' },
+  container: { backgroundColor: '#111827', padding: '30px', borderRadius: '12px', width: '100%', maxWidth: '500px', margin: '0 auto', border: '1px solid #1f2937', boxShadow: '0 4px 15px rgba(0,0,0,0.5)', fontFamily: 'system-ui, sans-serif', boxSizing: 'border-box' },
   title: { margin: '0 0 15px 0', fontSize: '20px', fontWeight: '700', color: '#fff', textAlign: 'center' },
   sectionLabel: { fontSize: '13px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '0.8px', margin: '15px 0 10px 0', display: 'block' },
   quickSelectContainer: { backgroundColor: '#0b0f19', padding: '12px', borderRadius: '8px', border: '1px solid #1f2937', marginBottom: '20px' },
